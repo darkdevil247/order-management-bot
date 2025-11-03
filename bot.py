@@ -29,27 +29,60 @@ if not ADMIN_CHAT_ID:
 if not SHEET_URL:
     logger.warning("⚠️ SHEET_URL not set, Google Sheets disabled")
 
-# Google Sheets setup (with error handling)
+# Google Sheets setup (FIXED VERSION)
 sheet = None
 try:
     if SHEET_URL:
         import gspread
         from google.oauth2.service_account import Credentials
         
-        # Get service account from environment or use None
+        # Get service account from environment
         service_account_json = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
         if service_account_json:
-            creds_dict = json.loads(service_account_json)
-            scope = ['https://www.googleapis.com/auth/spreadsheets']
-            creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
-            client = gspread.authorize(creds)
-            sheet = client.open_by_url(SHEET_URL).sheet1
-            logger.info("✅ Google Sheets connected successfully!")
+            try:
+                # Parse the JSON service account
+                creds_dict = json.loads(service_account_json)
+                scope = ['https://www.googleapis.com/auth/spreadsheets']
+                creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
+                client = gspread.authorize(creds)
+                
+                # Open the spreadsheet by URL
+                spreadsheet = client.open_by_url(SHEET_URL)
+                sheet = spreadsheet.sheet1  # Use the first worksheet
+                
+                # Test connection by getting first row
+                sheet.get_all_records()
+                logger.info("✅ Google Sheets connected successfully!")
+                
+            except Exception as e:
+                logger.error(f"❌ Google Sheets authentication failed: {e}")
+                sheet = None
         else:
-            logger.warning("⚠️ Google Sheets credentials not provided")
+            logger.warning("⚠️ GOOGLE_SERVICE_ACCOUNT_JSON not provided - Google Sheets disabled")
+            sheet = None
+except ImportError:
+    logger.error("❌ gspread not installed. Install with: pip install gspread")
+    sheet = None
 except Exception as e:
     logger.error(f"❌ Google Sheets setup failed: {e}")
     sheet = None
+
+# Initialize sheet headers if sheet is connected
+if sheet:
+    try:
+        # Check if headers exist, if not create them
+        existing_headers = sheet.row_values(1)
+        expected_headers = [
+            'Order Date', 'Chat ID', 'Customer Name', 'Phone', 'Address',
+            'Items', 'Quantities', 'Subtotal', 'Delivery Fee', 'Total',
+            'Status', 'Special Instructions', 'Payment Method', 'Source', 'Order ID'
+        ]
+        
+        if not existing_headers or existing_headers[0] != 'Order Date':
+            sheet.insert_row(expected_headers, 1)
+            logger.info("✅ Google Sheets headers initialized!")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize sheet headers: {e}")
 
 # Grocery database
 grocery_categories = {
@@ -108,6 +141,19 @@ def update_order_status(order_id, new_status, admin_note=""):
     old_status = order['status']
     order['status'] = new_status
     order['updated_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Update Google Sheets if connected
+    if sheet:
+        try:
+            # Find the row with this order ID and update status
+            records = sheet.get_all_records()
+            for i, record in enumerate(records, start=2):  # start=2 because row 1 is headers
+                if record.get('Order ID') == order_id:
+                    sheet.update_cell(i, 11, new_status)  # Column 11 is Status
+                    logger.info(f"✅ Updated order status in Google Sheets: {order_id} -> {new_status}")
+                    break
+        except Exception as e:
+            logger.error(f"❌ Failed to update Google Sheets status: {e}")
     
     # Notify customer
     notify_customer_order_update(order_id, new_status, admin_note)
@@ -347,7 +393,7 @@ Delivery Fee: ${delivery_fee:.2f}
 
 # ==================== FIXED SHEET SAVING ====================
 def save_order_to_sheet(chat_id, customer_name, phone, address, cart, special_instructions="", order_id=""):
-    """Simple order saving that always succeeds"""
+    """Save order to Google Sheets - FIXED VERSION"""
     logger.info(f"📦 Order received: {customer_name}, ${sum(details['price'] * details['quantity'] for details in cart.values()):.2f}")
     
     # Try to save to Google Sheets if available
@@ -357,44 +403,48 @@ def save_order_to_sheet(chat_id, customer_name, phone, address, cart, special_in
             delivery_fee = 0 if subtotal >= 50 else 5
             total = subtotal + delivery_fee
 
+            # Format items and quantities
             items_list = []
             quantities_list = []
             for item_name, details in cart.items():
                 items_list.append(item_name)
                 quantities_list.append(f"{details['quantity']} {details['unit']}")
 
-            items_lines = ["\n".join(items_list[i:i+3]) for i in range(0, len(items_list), 3)]
-            quantities_lines = ["\n".join(quantities_list[i:i+3]) for i in range(0, len(quantities_list), 3)]
-
+            # Prepare order data
             order_data = [
-                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                str(chat_id),
-                customer_name,
-                phone,
-                address,
-                "\n".join(items_lines),
-                "\n".join(quantities_lines),
-                f"${subtotal:.2f}",
-                f"${delivery_fee:.2f}",
-                f"${total:.2f}",
-                "Pending",
-                special_instructions,
-                "Cash on Delivery",
-                "Telegram Bot",
-                order_id
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),  # Order Date
+                str(chat_id),                                  # Chat ID
+                customer_name,                                 # Customer Name
+                phone,                                         # Phone
+                address,                                       # Address
+                ", ".join(items_list),                         # Items
+                ", ".join(quantities_list),                    # Quantities
+                f"${subtotal:.2f}",                           # Subtotal
+                f"${delivery_fee:.2f}",                       # Delivery Fee
+                f"${total:.2f}",                              # Total
+                "Pending",                                     # Status
+                special_instructions,                         # Special Instructions
+                "Cash on Delivery",                           # Payment Method
+                "Telegram Bot",                               # Source
+                order_id                                      # Order ID
             ]
 
+            # Append to sheet
             sheet.append_row(order_data)
-            logger.info("✅ Order saved to Google Sheets")
+            logger.info("✅ Order saved to Google Sheets successfully!")
+            return True
             
         except Exception as e:
             logger.error(f"❌ Google Sheets save failed: {e}")
-    
-    return True
+            logger.error(f"❌ Error details: {traceback.format_exc()}")
+            return False
+    else:
+        logger.info("ℹ️ Google Sheets not connected, order saved locally only")
+        return True
 
 # ==================== CASH ON DELIVERY PROCESSING ====================
 def process_cash_on_delivery(chat_id, customer_name, phone, address, cart, special_instructions):
-    """Process cash on delivery order - SIMPLIFIED VERSION"""
+    """Process cash on delivery order - FIXED VERSION"""
     try:
         # Create enhanced order summary
         order_summary, total = create_enhanced_order_summary(
@@ -405,14 +455,14 @@ def process_cash_on_delivery(chat_id, customer_name, phone, address, cart, speci
         order_id = generate_order_id()
         save_order_tracking(order_id, chat_id, customer_name, phone, address, cart, total, "Pending")
         
-        # Save to Google Sheets (non-blocking)
-        try:
-            save_order_to_sheet(
-                chat_id, customer_name, phone, address, cart, 
-                special_instructions, order_id
-            )
-        except Exception as e:
-            logger.error(f"❌ Sheets save error (non-critical): {e}")
+        # Save to Google Sheets (with proper error handling)
+        sheets_success = save_order_to_sheet(
+            chat_id, customer_name, phone, address, cart, 
+            special_instructions, order_id
+        )
+        
+        if not sheets_success:
+            logger.warning("⚠️ Order saved locally but Google Sheets failed")
         
         # Send confirmation to customer
         confirmation = f"""✅ Order Confirmed! 🎉
@@ -448,6 +498,7 @@ We're preparing your fresh groceries! 🥦"""
             
     except Exception as e:
         logger.error(f"❌ Critical error in COD order: {e}")
+        logger.error(f"❌ Error details: {traceback.format_exc()}")
         send_message(chat_id, "❌ Sorry, there was an error processing your order. Please try again.")
         return False
 
@@ -461,6 +512,7 @@ def handle_start(chat_id):
 ⏰ Delivery Hours: 7 AM - 10 PM Daily  
 💰 Payment: Cash on Delivery Only
 📦 Real-time Order Tracking
+📊 Automatic Order Logging
 
 <b>What would you like to do?</b>"""
 
@@ -718,7 +770,18 @@ def handle_message(chat_id, text):
         elif text == '📞 Contact Store':
             send_message(chat_id, "📞 FreshMart Contact Info:\n\n🏪 Store: FreshMart Grocery\n📞 Phone: 555-1234\n📍 Address: 123 Main Street\n⏰ Hours: 7 AM - 10 PM Daily")
         elif text == 'ℹ️ Store Info':
-            send_message(chat_id, "🏪 FreshMart Grocery\n\n🌟 Your trusted local grocery store!\n\n🚚 Free delivery on orders over $50\n💰 Cash on delivery only\n⏰ Fast 2-hour delivery\n🥦 Fresh produce daily\n📞 Call: 555-1234")
+            store_info = f"""🏪 FreshMart Grocery
+
+🌟 Your trusted local grocery store!
+
+🚚 Free delivery on orders over $50
+💰 Cash on delivery only
+⏰ Fast 2-hour delivery
+🥦 Fresh produce daily
+📞 Call: 555-1234
+
+{'📊 Orders automatically logged to Google Sheets' if sheet else '📊 Order tracking enabled'}"""
+            send_message(chat_id, store_info)
         else:
             # Handle any other text by showing main menu
             handle_start(chat_id)
@@ -735,9 +798,14 @@ def main():
         logger.error("💡 Set it in Railway → Variables tab")
         exit(1)
 
+    # Log connection status
     logger.info("🛒 FreshMart Grocery Bot Started Successfully!")
     logger.info("📊 Features: Order Tracking, Admin Controls, Real-time Updates")
     logger.info("💰 Payment: Cash on Delivery Only")
+    if sheet:
+        logger.info("✅ Google Sheets Integration: ACTIVE")
+    else:
+        logger.info("❌ Google Sheets Integration: DISABLED - Check environment variables")
     logger.info("📱 Ready to take orders with professional order tracking!")
 
     while True:
