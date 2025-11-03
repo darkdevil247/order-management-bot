@@ -1,12 +1,9 @@
-# Python
-__pycache__/
-*.pyc
-.env
-config.py
-
-# Environment variables
-.env.local
-.env.production
-
-# Railway
-.railway/
+{
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "deploy": {
+    "startCommand": "python bot.py",
+    "restartPolicyType": "ON_FAILURE"
+  }
+}
