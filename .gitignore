@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+.env
+config.py
+
+# Environment variables
+.env.local
+.env.production
+
+# Railway
+.railway/
