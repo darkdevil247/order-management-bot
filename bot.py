@@ -15,12 +15,17 @@ SHEET_URL = os.environ.get('SHEET_URL')
 ADMIN_CHAT_ID = os.environ.get('ADMIN_CHAT_ID')
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Check if environment variables are set
 if not TELEGRAM_TOKEN:
     logger.error("❌ TELEGRAM_TOKEN environment variable not set!")
+    exit(1)
+
+if not ADMIN_CHAT_ID:
+    logger.warning("⚠️ ADMIN_CHAT_ID not set, admin features disabled")
+
 if not SHEET_URL:
     logger.warning("⚠️ SHEET_URL not set, Google Sheets disabled")
 
@@ -34,7 +39,6 @@ try:
         # Get service account from environment or use None
         service_account_json = os.environ.get('GOOGLE_SERVICE_ACCOUNT_JSON')
         if service_account_json:
-            import json
             creds_dict = json.loads(service_account_json)
             scope = ['https://www.googleapis.com/auth/spreadsheets']
             creds = Credentials.from_service_account_info(creds_dict, scopes=scope)
@@ -47,7 +51,7 @@ except Exception as e:
     logger.error(f"❌ Google Sheets setup failed: {e}")
     sheet = None
 
-# Grocery database (SAFE - no secrets)
+# Grocery database
 grocery_categories = {
     '🥦 Fresh Produce': {
         '🍎 Apples': {'price': 3.99, 'unit': 'kg'},
@@ -72,7 +76,8 @@ grocery_categories = {
 
 user_carts = {}
 user_sessions = {}
-order_tracking = {}  # Store order tracking data
+order_tracking = {}
+last_update_id = 0  # Global variable to track updates
 
 # ==================== ORDER TRACKING SYSTEM ====================
 def generate_order_id():
@@ -86,21 +91,13 @@ def save_order_tracking(order_id, chat_id, customer_name, phone, address, cart, 
         'customer_name': customer_name,
         'phone': phone,
         'address': address,
-        'cart': cart,
+        'cart': cart.copy(),  # Create a copy to avoid reference issues
         'total': total,
         'status': status,
         'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         'updated_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
     return order_id
-
-def get_pending_orders():
-    """Get all pending orders for admin"""
-    pending_orders = {}
-    for order_id, order in order_tracking.items():
-        if order['status'] == 'Pending':
-            pending_orders[order_id] = order
-    return pending_orders
 
 def update_order_status(order_id, new_status, admin_note=""):
     """Update order status and notify customer"""
@@ -114,9 +111,6 @@ def update_order_status(order_id, new_status, admin_note=""):
     
     # Notify customer
     notify_customer_order_update(order_id, new_status, admin_note)
-    
-    # Update Google Sheets if available
-    update_sheet_order_status(order_id, new_status)
     
     logger.info(f"✅ Order {order_id} status updated: {old_status} → {new_status}")
     return True
@@ -154,8 +148,6 @@ We're sorry to inform you that your order #{order_id} has been cancelled.
 
 {f'📝 Reason: {admin_note}' if admin_note else '📝 Reason: Unable to fulfill order at this time'}
 
-💳 If payment was made, refund will be processed within 24 hours.
-
 We apologize for the inconvenience.
 
 FreshMart Team 🛒""",
@@ -175,24 +167,12 @@ We hope to serve you again soon! 🌟"""
     if message:
         send_message(chat_id, message)
 
-def update_sheet_order_status(order_id, new_status):
-    """Update order status in Google Sheets"""
-    if not sheet:
-        return
-    
-    try:
-        # Find the order row and update status
-        records = sheet.get_all_records()
-        for i, record in enumerate(records, start=2):  # start=2 because row 1 is header
-            if str(record.get('Customer ID', '')) == str(order_tracking[order_id]['chat_id']):
-                sheet.update_cell(i, 11, new_status)  # Column 11 is Status
-                break
-    except Exception as e:
-        logger.error(f"❌ Error updating sheet status: {e}")
-
 # ==================== ADMIN ORDER MANAGEMENT ====================
 def send_admin_order_notification(order_id, order_data):
     """Send new order notification to admin with action buttons"""
+    if not ADMIN_CHAT_ID:
+        return
+        
     order_summary = create_admin_order_summary(order_id, order_data)
     
     admin_message = f"""🆕 NEW ORDER #{order_id}
@@ -237,7 +217,7 @@ def create_admin_order_summary(order_id, order_data):
 
 def handle_admin_callback(chat_id, callback_data):
     """Handle admin action callbacks"""
-    if not str(chat_id) == ADMIN_CHAT_ID:
+    if not ADMIN_CHAT_ID or str(chat_id) != ADMIN_CHAT_ID:
         send_message(chat_id, "❌ Unauthorized access.")
         return
     
@@ -281,7 +261,7 @@ Updated: {order['updated_at']}
 
 Items:"""
                 for item_name, details in order['cart'].items():
-                    details += f"\n• {item_name} - {details['quantity']} {details['unit']}"
+                    details += f"\n• {item_name} - {order['cart'][item_name]['quantity']} {order['cart'][item_name]['unit']}"
                 
                 send_message(chat_id, details)
             else:
@@ -323,7 +303,6 @@ def send_message(chat_id, text, keyboard=None, inline_keyboard=None, parse_mode=
             logger.error(f"Telegram API error: {response.status_code} - {response.text}")
             return False
             
-        logger.info(f"✅ Message sent to {chat_id}")
         return True
         
     except Exception as e:
@@ -371,17 +350,6 @@ def save_order_to_sheet(chat_id, customer_name, phone, address, cart, special_in
     """Simple order saving that always succeeds"""
     logger.info(f"📦 Order received: {customer_name}, ${sum(details['price'] * details['quantity'] for details in cart.values()):.2f}")
     
-    # Log order details (for debugging)
-    order_details = {
-        'customer': customer_name,
-        'phone': phone,
-        'address': address,
-        'items': list(cart.keys()),
-        'total': sum(details['price'] * details['quantity'] for details in cart.values()),
-        'instructions': special_instructions
-    }
-    logger.info(f"📝 Order details: {order_details}")
-    
     # Try to save to Google Sheets if available
     if sheet:
         try:
@@ -413,7 +381,7 @@ def save_order_to_sheet(chat_id, customer_name, phone, address, cart, special_in
                 special_instructions,
                 payment_method,
                 "Telegram Bot",
-                order_id  # Add order ID to sheet
+                order_id
             ]
 
             sheet.append_row(order_data)
@@ -425,25 +393,6 @@ def save_order_to_sheet(chat_id, customer_name, phone, address, cart, special_in
     return True
 
 # ==================== PAYMENT PROCESSING ====================
-def handle_payment_selection(chat_id):
-    """Let customer choose payment method"""
-    payment_text = """💳 Payment Method
-
-How would you like to pay for your order?
-
-💰 Cash on Delivery - Pay when you receive your groceries
-💳 Online Payment - Pay now securely (Coming Soon!)
-
-Select your preferred payment method:"""
-    
-    keyboard = [
-        [{'text': '💰 Cash on Delivery'}, {'text': '💳 Online Payment (Soon)'}],
-        [{'text': '🔙 Back to Checkout'}, {'text': '🛒 View Cart'}]
-    ]
-    
-    send_message(chat_id, payment_text, keyboard=keyboard)
-    user_sessions[chat_id] = {'step': 'awaiting_payment_method'}
-
 def process_cash_on_delivery(chat_id, customer_name, phone, address, cart, special_instructions):
     """Process cash on delivery order - FIXED VERSION"""
     try:
@@ -457,15 +406,13 @@ def process_cash_on_delivery(chat_id, customer_name, phone, address, cart, speci
         save_order_tracking(order_id, chat_id, customer_name, phone, address, cart, total, "Pending")
         
         # Save to Google Sheets (non-blocking)
-        sheets_success = True
         try:
-            sheets_success = save_order_to_sheet(
+            save_order_to_sheet(
                 chat_id, customer_name, phone, address, cart, 
                 special_instructions, "Cash on Delivery", order_id
             )
         except Exception as e:
             logger.error(f"❌ Sheets save error (non-critical): {e}")
-            sheets_success = True  # Continue anyway
         
         # Send confirmation to customer
         confirmation = f"""✅ Order Confirmed! 🎉
@@ -492,7 +439,8 @@ We're preparing your fresh groceries! 🥦"""
             logger.warning(f"⚠️ Admin notification failed: {e}")
         
         # Clear cart and session
-        user_carts[chat_id] = {}
+        if chat_id in user_carts:
+            user_carts[chat_id] = {}
         user_sessions[chat_id] = {'step': 'main_menu'}
         
         logger.info(f"✅ COD order completed successfully for {customer_name}, Order ID: {order_id}")
@@ -500,11 +448,7 @@ We're preparing your fresh groceries! 🥦"""
             
     except Exception as e:
         logger.error(f"❌ Critical error in COD order: {e}")
-        # Try to send error message to user
-        try:
-            send_message(chat_id, "❌ Sorry, there was an error processing your order. Please try again or contact support.")
-        except:
-            pass
+        send_message(chat_id, "❌ Sorry, there was an error processing your order. Please try again.")
         return False
 
 # ==================== BOT HANDLERS ====================
@@ -518,7 +462,7 @@ def handle_start(chat_id):
 💰 Payment: Cash on Delivery Available
 📦 Real-time Order Tracking
 
-<b>What would you like to order?</b>"""
+<b>What would you like to do?</b>"""
 
     keyboard = [
         [{'text': '🛍️ Shop Groceries'}, {'text': '🛒 My Cart'}],
@@ -658,21 +602,32 @@ def handle_callback_query(chat_id, callback_data):
         handle_admin_callback(chat_id, callback_data)
 
 def get_updates(offset=None):
+    """Get updates from Telegram with proper error handling"""
+    global last_update_id
+    
     if not TELEGRAM_TOKEN:
-        logger.error("Cannot get updates: TELEGRAM_TOKEN not set")
         return None
         
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
-    params = {'timeout': 30}
-    if offset:
-        params['offset'] = offset
+    params = {'timeout': 30, 'offset': offset or last_update_id + 1}
         
     try:
         response = requests.get(url, params=params, timeout=35)
         if response.status_code == 200:
-            return response.json()
+            data = response.json()
+            if data.get('ok') and data.get('result'):
+                # Update the last_update_id to the highest update_id received
+                updates = data['result']
+                if updates:
+                    last_update_id = max(update['update_id'] for update in updates)
+                return data
+            return None
         else:
-            logger.error(f"Telegram API error: {response.status_code}")
+            if response.status_code == 409:
+                logger.error("❌ Telegram API Error 409: Another bot instance is running with the same token!")
+                logger.error("💡 Solution: Stop any other running instances of this bot")
+            else:
+                logger.error(f"Telegram API error: {response.status_code}")
             return None
     except Exception as e:
         logger.error(f"get_updates error: {e}")
@@ -696,7 +651,14 @@ def handle_message(chat_id, text):
             if user_orders:
                 track_text = "📦 Your Orders:\n\n"
                 for order_id, order in user_orders[-5:]:  # Show last 5 orders
-                    track_text += f"Order #{order_id}\n"
+                    status_emoji = {
+                        'Pending': '⏳',
+                        'Shipped': '🚚', 
+                        'Delivered': '✅',
+                        'Cancelled': '❌'
+                    }.get(order['status'], '📦')
+                    
+                    track_text += f"{status_emoji} Order #{order_id}\n"
                     track_text += f"Status: {order['status']}\n"
                     track_text += f"Total: ${order['total']:.2f}\n"
                     track_text += f"Date: {order['created_at']}\n\n"
@@ -725,19 +687,6 @@ def handle_message(chat_id, text):
         elif text == '💳 Online Payment (Soon)':
             send_message(chat_id, "⚡ Online payments coming soon!\n\nFor now, please use Cash on Delivery for your orders.")
             handle_payment_selection(chat_id)
-        elif text == '💰 Payment Methods':
-            payment_info = """💳 <b>Payment Options</b>
-
-Currently Available:
-💰 <b>Cash on Delivery</b> - Pay when you receive your groceries
-
-Coming Soon:
-💳 <b>Credit/Debit Cards</b>
-📱 <b>Mobile Payments</b>
-🎫 <b>Digital Wallets</b>
-
-We're working to bring you more payment options soon!"""
-            send_message(chat_id, payment_info)
         elif user_sessions.get(chat_id, {}).get('step') == 'awaiting_name':
             customer_name = text
             user_sessions[chat_id] = {'step': 'awaiting_phone', 'customer_name': customer_name}
@@ -775,6 +724,7 @@ We're working to bring you more payment options soon!"""
                 send_message(chat_id, f"❌ Failed to cancel order #{order_id}")
             user_sessions[chat_id] = {'step': 'main_menu'}
         else:
+            # Handle any other text by showing main menu
             handle_start(chat_id)
 
     except Exception as e:
@@ -787,26 +737,19 @@ def main():
     if not TELEGRAM_TOKEN:
         logger.error("❌ CRITICAL: TELEGRAM_TOKEN environment variable not set!")
         logger.error("💡 Set it in Railway → Variables tab")
-        logger.error("💤 Bot will sleep instead of crashing...")
-        while True:
-            time.sleep(60)
-        return
+        exit(1)
 
     logger.info("🛒 FreshMart Grocery Bot Started Successfully!")
     logger.info("📊 Features: Order Tracking, Admin Controls, Real-time Updates")
     logger.info("💰 Payment: Cash on Delivery Implemented")
     logger.info("📱 Ready to take orders with professional order tracking!")
 
-    last_update_id = None
-
     while True:
         try:
-            updates = get_updates(last_update_id)
+            updates = get_updates()
 
             if updates and 'result' in updates:
                 for update in updates['result']:
-                    last_update_id = update['update_id'] + 1
-
                     if 'message' in update and 'text' in update['message']:
                         chat_id = update['message']['chat']['id']
                         text = update['message']['text']
@@ -824,7 +767,6 @@ def main():
             
         except Exception as e:
             logger.error(f"❌ Main loop error: {e}")
-            logger.error(traceback.format_exc())
             time.sleep(5)
 
 if __name__ == '__main__':
