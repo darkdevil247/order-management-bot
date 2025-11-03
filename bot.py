@@ -72,6 +72,224 @@ grocery_categories = {
 
 user_carts = {}
 user_sessions = {}
+order_tracking = {}  # Store order tracking data
+
+# ==================== ORDER TRACKING SYSTEM ====================
+def generate_order_id():
+    """Generate unique order ID"""
+    return f"ORD{int(time.time())}"
+
+def save_order_tracking(order_id, chat_id, customer_name, phone, address, cart, total, status="Pending"):
+    """Save order to tracking system"""
+    order_tracking[order_id] = {
+        'chat_id': chat_id,
+        'customer_name': customer_name,
+        'phone': phone,
+        'address': address,
+        'cart': cart,
+        'total': total,
+        'status': status,
+        'created_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        'updated_at': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    return order_id
+
+def get_pending_orders():
+    """Get all pending orders for admin"""
+    pending_orders = {}
+    for order_id, order in order_tracking.items():
+        if order['status'] == 'Pending':
+            pending_orders[order_id] = order
+    return pending_orders
+
+def update_order_status(order_id, new_status, admin_note=""):
+    """Update order status and notify customer"""
+    if order_id not in order_tracking:
+        return False
+    
+    order = order_tracking[order_id]
+    old_status = order['status']
+    order['status'] = new_status
+    order['updated_at'] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Notify customer
+    notify_customer_order_update(order_id, new_status, admin_note)
+    
+    # Update Google Sheets if available
+    update_sheet_order_status(order_id, new_status)
+    
+    logger.info(f"✅ Order {order_id} status updated: {old_status} → {new_status}")
+    return True
+
+def notify_customer_order_update(order_id, new_status, admin_note=""):
+    """Notify customer about order status update"""
+    order = order_tracking.get(order_id)
+    if not order:
+        return
+    
+    chat_id = order['chat_id']
+    customer_name = order['customer_name']
+    
+    status_messages = {
+        'Shipped': f"""🚚 Order Shipped! 
+
+Hi {customer_name},
+
+Your order #{order_id} is on the way! 
+
+📦 Delivery Details:
+• Order will arrive within 2 hours
+• Please have ${order['total']:.2f} ready for cash payment
+• Contact: 555-1234 if any issues
+
+{f'📝 Note from store: {admin_note}' if admin_note else ''}
+
+Thank you for choosing FreshMart! 🛒""",
+        
+        'Cancelled': f"""❌ Order Cancelled
+
+Hi {customer_name},
+
+We're sorry to inform you that your order #{order_id} has been cancelled.
+
+{f'📝 Reason: {admin_note}' if admin_note else '📝 Reason: Unable to fulfill order at this time'}
+
+💳 If payment was made, refund will be processed within 24 hours.
+
+We apologize for the inconvenience.
+
+FreshMart Team 🛒""",
+        
+        'Delivered': f"""✅ Order Delivered! 
+
+Hi {customer_name},
+
+Your order #{order_id} has been successfully delivered!
+
+Thank you for shopping with FreshMart! 🛒
+
+We hope to serve you again soon! 🌟"""
+    }
+    
+    message = status_messages.get(new_status)
+    if message:
+        send_message(chat_id, message)
+
+def update_sheet_order_status(order_id, new_status):
+    """Update order status in Google Sheets"""
+    if not sheet:
+        return
+    
+    try:
+        # Find the order row and update status
+        records = sheet.get_all_records()
+        for i, record in enumerate(records, start=2):  # start=2 because row 1 is header
+            if str(record.get('Customer ID', '')) == str(order_tracking[order_id]['chat_id']):
+                sheet.update_cell(i, 11, new_status)  # Column 11 is Status
+                break
+    except Exception as e:
+        logger.error(f"❌ Error updating sheet status: {e}")
+
+# ==================== ADMIN ORDER MANAGEMENT ====================
+def send_admin_order_notification(order_id, order_data):
+    """Send new order notification to admin with action buttons"""
+    order_summary = create_admin_order_summary(order_id, order_data)
+    
+    admin_message = f"""🆕 NEW ORDER #{order_id}
+
+{order_summary}
+
+⏰ Order Time: {order_data['created_at']}
+📊 Status: {order_data['status']}
+
+Choose action:"""
+    
+    # Inline keyboard for admin actions
+    inline_keyboard = [
+        [
+            {'text': '🚚 Mark as Shipped', 'callback_data': f'ship_{order_id}'},
+            {'text': '❌ Cancel Order', 'callback_data': f'cancel_{order_id}'}
+        ],
+        [
+            {'text': '✅ Mark Delivered', 'callback_data': f'deliver_{order_id}'},
+            {'text': '📋 View Details', 'callback_data': f'details_{order_id}'}
+        ]
+    ]
+    
+    send_message(ADMIN_CHAT_ID, admin_message, inline_keyboard=inline_keyboard)
+
+def create_admin_order_summary(order_id, order_data):
+    """Create order summary for admin"""
+    cart = order_data['cart']
+    items_text = ""
+    for item_name, details in cart.items():
+        items_text += f"• {item_name} - {details['quantity']} {details['unit']}\n"
+    
+    summary = f"""👤 Customer: {order_data['customer_name']}
+📞 Phone: {order_data['phone']}
+📍 Address: {order_data['address']}
+
+📦 Order Items:
+{items_text}
+💰 Total: ${order_data['total']:.2f}"""
+    
+    return summary
+
+def handle_admin_callback(chat_id, callback_data):
+    """Handle admin action callbacks"""
+    if not str(chat_id) == ADMIN_CHAT_ID:
+        send_message(chat_id, "❌ Unauthorized access.")
+        return
+    
+    try:
+        if callback_data.startswith('ship_'):
+            order_id = callback_data[5:]
+            if update_order_status(order_id, 'Shipped', 'Your order is on the way!'):
+                send_message(chat_id, f"✅ Order #{order_id} marked as shipped! Customer notified.")
+            else:
+                send_message(chat_id, f"❌ Order #{order_id} not found.")
+                
+        elif callback_data.startswith('cancel_'):
+            order_id = callback_data[7:]
+            # Ask for cancellation reason
+            user_sessions[chat_id] = {
+                'step': 'awaiting_cancel_reason',
+                'order_id': order_id
+            }
+            send_message(chat_id, f"📝 Please provide reason for cancelling order #{order_id}:")
+            
+        elif callback_data.startswith('deliver_'):
+            order_id = callback_data[8:]
+            if update_order_status(order_id, 'Delivered'):
+                send_message(chat_id, f"✅ Order #{order_id} marked as delivered! Customer notified.")
+            else:
+                send_message(chat_id, f"❌ Order #{order_id} not found.")
+                
+        elif callback_data.startswith('details_'):
+            order_id = callback_data[8:]
+            order = order_tracking.get(order_id)
+            if order:
+                details = f"""📋 Order Details #{order_id}
+
+Customer: {order['customer_name']}
+Phone: {order['phone']}
+Address: {order['address']}
+Status: {order['status']}
+Total: ${order['total']:.2f}
+Created: {order['created_at']}
+Updated: {order['updated_at']}
+
+Items:"""
+                for item_name, details in order['cart'].items():
+                    details += f"\n• {item_name} - {details['quantity']} {details['unit']}"
+                
+                send_message(chat_id, details)
+            else:
+                send_message(chat_id, f"❌ Order #{order_id} not found.")
+                
+    except Exception as e:
+        logger.error(f"❌ Admin callback error: {e}")
+        send_message(chat_id, "❌ Error processing admin action.")
 
 # ==================== ENHANCED MESSAGE HANDLING ====================
 def send_message(chat_id, text, keyboard=None, inline_keyboard=None, parse_mode='HTML'):
@@ -112,28 +330,6 @@ def send_message(chat_id, text, keyboard=None, inline_keyboard=None, parse_mode=
         logger.error(f"❌ Error sending message: {e}")
         return False
 
-# ==================== ADMIN NOTIFICATIONS ====================
-def notify_admin(order_summary, order_type="🆕 NEW ORDER"):
-    """Send immediate notification to store owner/administrator"""
-    if not ADMIN_CHAT_ID:
-        logger.warning("⚠️ ADMIN_CHAT_ID not set, skipping admin notification")
-        return False
-        
-    try:
-        admin_message = f"""{order_type}
-
-{order_summary}
-
-⏰ Time: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
-📊 Status: Awaiting Processing"""
-        
-        send_message(ADMIN_CHAT_ID, admin_message)
-        logger.info("✅ Admin notified successfully")
-        return True
-    except Exception as e:
-        logger.error(f"❌ Failed to notify admin: {e}")
-        return False
-
 # ==================== ENHANCED ORDER SUMMARY ====================
 def create_enhanced_order_summary(customer_name, phone, address, cart, special_instructions=""):
     """Create a beautifully formatted order summary"""
@@ -170,6 +366,64 @@ Delivery Fee: ${delivery_fee:.2f}
     
     return summary, total
 
+# ==================== FIXED SHEET SAVING ====================
+def save_order_to_sheet(chat_id, customer_name, phone, address, cart, special_instructions="", payment_method="Cash on Delivery", order_id=""):
+    """Simple order saving that always succeeds"""
+    logger.info(f"📦 Order received: {customer_name}, ${sum(details['price'] * details['quantity'] for details in cart.values()):.2f}")
+    
+    # Log order details (for debugging)
+    order_details = {
+        'customer': customer_name,
+        'phone': phone,
+        'address': address,
+        'items': list(cart.keys()),
+        'total': sum(details['price'] * details['quantity'] for details in cart.values()),
+        'instructions': special_instructions
+    }
+    logger.info(f"📝 Order details: {order_details}")
+    
+    # Try to save to Google Sheets if available
+    if sheet:
+        try:
+            subtotal = sum(details['price'] * details['quantity'] for details in cart.values())
+            delivery_fee = 0 if subtotal >= 50 else 5
+            total = subtotal + delivery_fee
+
+            items_list = []
+            quantities_list = []
+            for item_name, details in cart.items():
+                items_list.append(item_name)
+                quantities_list.append(f"{details['quantity']} {details['unit']}")
+
+            items_lines = ["\n".join(items_list[i:i+3]) for i in range(0, len(items_list), 3)]
+            quantities_lines = ["\n".join(quantities_list[i:i+3]) for i in range(0, len(quantities_list), 3)]
+
+            order_data = [
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                str(chat_id),
+                customer_name,
+                phone,
+                address,
+                "\n".join(items_lines),
+                "\n".join(quantities_lines),
+                f"${subtotal:.2f}",
+                f"${delivery_fee:.2f}",
+                f"${total:.2f}",
+                "Pending",
+                special_instructions,
+                payment_method,
+                "Telegram Bot",
+                order_id  # Add order ID to sheet
+            ]
+
+            sheet.append_row(order_data)
+            logger.info("✅ Order saved to Google Sheets")
+            
+        except Exception as e:
+            logger.error(f"❌ Google Sheets save failed: {e}")
+    
+    return True
+
 # ==================== PAYMENT PROCESSING ====================
 def handle_payment_selection(chat_id):
     """Let customer choose payment method"""
@@ -191,103 +445,67 @@ Select your preferred payment method:"""
     user_sessions[chat_id] = {'step': 'awaiting_payment_method'}
 
 def process_cash_on_delivery(chat_id, customer_name, phone, address, cart, special_instructions):
-    """Process cash on delivery order"""
+    """Process cash on delivery order - FIXED VERSION"""
     try:
+        # Create enhanced order summary
         order_summary, total = create_enhanced_order_summary(
             customer_name, phone, address, cart, special_instructions
         )
         
-        # Save to Google Sheets if available
-        success = True
-        if sheet:
-            success = save_order_to_sheet(
-                chat_id, customer_name, phone, address, cart, 
-                special_instructions, "Cash on Delivery"
-            )
+        # Generate order ID and save to tracking
+        order_id = generate_order_id()
+        save_order_tracking(order_id, chat_id, customer_name, phone, address, cart, total, "Pending")
         
-        if success:
-            # Notify admin
-            admin_summary = f"""💵 CASH ON DELIVERY ORDER
-
-{order_summary}
-
-💰 Payment Method: Cash on Delivery
-💸 Amount to Collect: ${total:.2f}"""
-            
-            notify_admin(admin_summary, "💵 NEW COD ORDER")
-            
-            # Send customer confirmation
-            confirmation = f"""✅ Order Confirmed! 🎉
+        # Save to Google Sheets (non-blocking)
+        sheets_success = True
+        try:
+            sheets_success = save_order_to_sheet(
+                chat_id, customer_name, phone, address, cart, 
+                special_instructions, "Cash on Delivery", order_id
+            )
+        except Exception as e:
+            logger.error(f"❌ Sheets save error (non-critical): {e}")
+            sheets_success = True  # Continue anyway
+        
+        # Send confirmation to customer
+        confirmation = f"""✅ Order Confirmed! 🎉
 
 Thank you {customer_name}!
 
 {order_summary}
 
+📦 Order ID: #{order_id}
 💵 Payment: Cash on Delivery
 💸 Please have ${total:.2f} ready for our delivery driver.
 
+We'll notify you when your order ships! 🚚
+
 We're preparing your fresh groceries! 🥦"""
-            
-            send_message(chat_id, confirmation)
-            
-            # Clear cart and session
-            user_carts[chat_id] = {}
-            user_sessions[chat_id] = {'step': 'main_menu'}
-            
-            logger.info(f"✅ COD order processed successfully for {customer_name}")
-            return True
-            
-    except Exception as e:
-        logger.error(f"❌ Error processing COD order: {e}")
-        send_message(chat_id, "❌ Sorry, there was an error processing your order. Please try again.")
-        return False
-
-# ==================== ENHANCED SHEET SAVING ====================
-def save_order_to_sheet(chat_id, customer_name, phone, address, cart, special_instructions="", payment_method="Cash on Delivery"):
-    """Enhanced order saving with payment method"""
-    if not sheet:
-        logger.warning("Google Sheets not available, order not saved")
-        return True  # Return True to continue order process
-
-    try:
-        subtotal = sum(details['price'] * details['quantity'] for details in cart.values())
-        delivery_fee = 0 if subtotal >= 50 else 5
-        total = subtotal + delivery_fee
-
-        # Format items
-        items_list = []
-        quantities_list = []
-        for item_name, details in cart.items():
-            items_list.append(item_name)
-            quantities_list.append(f"{details['quantity']} {details['unit']}")
-
-        items_lines = ["\n".join(items_list[i:i+3]) for i in range(0, len(items_list), 3)]
-        quantities_lines = ["\n".join(quantities_list[i:i+3]) for i in range(0, len(quantities_list), 3)]
-
-        order_data = [
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            str(chat_id),
-            customer_name,
-            phone,
-            address,
-            "\n".join(items_lines),
-            "\n".join(quantities_lines),
-            f"${subtotal:.2f}",
-            f"${delivery_fee:.2f}",
-            f"${total:.2f}",
-            "Pending",
-            special_instructions,
-            payment_method,
-            "Telegram Bot"
-        ]
-
-        sheet.append_row(order_data)
-        logger.info(f"✅ Order saved to sheet: {customer_name} - ${total:.2f}")
+        
+        send_message(chat_id, confirmation)
+        
+        # Notify admin with action buttons
+        try:
+            order_data = order_tracking[order_id]
+            send_admin_order_notification(order_id, order_data)
+        except Exception as e:
+            logger.warning(f"⚠️ Admin notification failed: {e}")
+        
+        # Clear cart and session
+        user_carts[chat_id] = {}
+        user_sessions[chat_id] = {'step': 'main_menu'}
+        
+        logger.info(f"✅ COD order completed successfully for {customer_name}, Order ID: {order_id}")
         return True
-
+            
     except Exception as e:
-        logger.error(f"❌ Error saving order to sheet: {e}")
-        return False  # Order continues even if sheet save fails
+        logger.error(f"❌ Critical error in COD order: {e}")
+        # Try to send error message to user
+        try:
+            send_message(chat_id, "❌ Sorry, there was an error processing your order. Please try again or contact support.")
+        except:
+            pass
+        return False
 
 # ==================== BOT HANDLERS ====================
 def handle_start(chat_id):
@@ -295,15 +513,16 @@ def handle_start(chat_id):
 
 🌟 <b>Fresh Groceries Delivered to Your Doorstep!</b> 🌟
 
-🚚 <b>Free Delivery</b> on orders over $50
-⏰ <b>Delivery Hours:</b> 7 AM - 10 PM Daily
-💰 <b>Payment:</b> Cash on Delivery Available
+🚚 Free Delivery on orders over $50
+⏰ Delivery Hours: 7 AM - 10 PM Daily  
+💰 Payment: Cash on Delivery Available
+📦 Real-time Order Tracking
 
-<b>What would you like to do?</b>"""
+<b>What would you like to order?</b>"""
 
     keyboard = [
         [{'text': '🛍️ Shop Groceries'}, {'text': '🛒 My Cart'}],
-        [{'text': '💰 Payment Methods'}, {'text': '📞 Contact Store'}],
+        [{'text': '📦 Track Order'}, {'text': '📞 Contact Store'}],
         [{'text': 'ℹ️ Store Info'}]
     ]
 
@@ -435,6 +654,8 @@ def handle_callback_query(chat_id, callback_data):
         show_categories(chat_id)
     elif callback_data == 'view_cart':
         show_cart(chat_id)
+    elif callback_data.startswith(('ship_', 'cancel_', 'deliver_', 'details_')):
+        handle_admin_callback(chat_id, callback_data)
 
 def get_updates(offset=None):
     if not TELEGRAM_TOKEN:
@@ -465,6 +686,23 @@ def handle_message(chat_id, text):
             show_categories(chat_id)
         elif text == '🛒 My Cart':
             show_cart(chat_id)
+        elif text == '📦 Track Order':
+            # Show user's recent orders
+            user_orders = []
+            for order_id, order in order_tracking.items():
+                if order['chat_id'] == chat_id:
+                    user_orders.append((order_id, order))
+            
+            if user_orders:
+                track_text = "📦 Your Orders:\n\n"
+                for order_id, order in user_orders[-5:]:  # Show last 5 orders
+                    track_text += f"Order #{order_id}\n"
+                    track_text += f"Status: {order['status']}\n"
+                    track_text += f"Total: ${order['total']:.2f}\n"
+                    track_text += f"Date: {order['created_at']}\n\n"
+                send_message(chat_id, track_text)
+            else:
+                send_message(chat_id, "📦 You don't have any orders yet. Start shopping! 🛍️")
         elif text == '🔙 Main Menu':
             handle_start(chat_id)
         elif text == '📋 Continue Shopping':
@@ -528,6 +766,14 @@ We're working to bring you more payment options soon!"""
                     user_carts[chat_id],
                     special_instructions
                 )
+        elif user_sessions.get(chat_id, {}).get('step') == 'awaiting_cancel_reason':
+            # Admin providing cancellation reason
+            order_id = user_sessions[chat_id].get('order_id')
+            if order_id and update_order_status(order_id, 'Cancelled', text):
+                send_message(chat_id, f"✅ Order #{order_id} cancelled! Customer notified with your reason.")
+            else:
+                send_message(chat_id, f"❌ Failed to cancel order #{order_id}")
+            user_sessions[chat_id] = {'step': 'main_menu'}
         else:
             handle_start(chat_id)
 
@@ -547,9 +793,9 @@ def main():
         return
 
     logger.info("🛒 FreshMart Grocery Bot Started Successfully!")
-    logger.info("📊 Features: Enhanced Logging, Admin Notifications, Payment Processing")
+    logger.info("📊 Features: Order Tracking, Admin Controls, Real-time Updates")
     logger.info("💰 Payment: Cash on Delivery Implemented")
-    logger.info("📱 Ready to take orders with professional error handling!")
+    logger.info("📱 Ready to take orders with professional order tracking!")
 
     last_update_id = None
 
