@@ -346,7 +346,7 @@ Delivery Fee: ${delivery_fee:.2f}
     return summary, total
 
 # ==================== FIXED SHEET SAVING ====================
-def save_order_to_sheet(chat_id, customer_name, phone, address, cart, special_instructions="", payment_method="Cash on Delivery", order_id=""):
+def save_order_to_sheet(chat_id, customer_name, phone, address, cart, special_instructions="", order_id=""):
     """Simple order saving that always succeeds"""
     logger.info(f"📦 Order received: {customer_name}, ${sum(details['price'] * details['quantity'] for details in cart.values()):.2f}")
     
@@ -379,7 +379,7 @@ def save_order_to_sheet(chat_id, customer_name, phone, address, cart, special_in
                 f"${total:.2f}",
                 "Pending",
                 special_instructions,
-                payment_method,
+                "Cash on Delivery",
                 "Telegram Bot",
                 order_id
             ]
@@ -392,9 +392,9 @@ def save_order_to_sheet(chat_id, customer_name, phone, address, cart, special_in
     
     return True
 
-# ==================== PAYMENT PROCESSING ====================
+# ==================== CASH ON DELIVERY PROCESSING ====================
 def process_cash_on_delivery(chat_id, customer_name, phone, address, cart, special_instructions):
-    """Process cash on delivery order - FIXED VERSION"""
+    """Process cash on delivery order - SIMPLIFIED VERSION"""
     try:
         # Create enhanced order summary
         order_summary, total = create_enhanced_order_summary(
@@ -409,7 +409,7 @@ def process_cash_on_delivery(chat_id, customer_name, phone, address, cart, speci
         try:
             save_order_to_sheet(
                 chat_id, customer_name, phone, address, cart, 
-                special_instructions, "Cash on Delivery", order_id
+                special_instructions, order_id
             )
         except Exception as e:
             logger.error(f"❌ Sheets save error (non-critical): {e}")
@@ -459,7 +459,7 @@ def handle_start(chat_id):
 
 🚚 Free Delivery on orders over $50
 ⏰ Delivery Hours: 7 AM - 10 PM Daily  
-💰 Payment: Cash on Delivery Available
+💰 Payment: Cash on Delivery Only
 📦 Real-time Order Tracking
 
 <b>What would you like to do?</b>"""
@@ -480,8 +480,7 @@ Choose a category to start shopping:"""
 
     keyboard = [
         [{'text': '🥦 Fresh Produce'}, {'text': '🥩 Meat & Poultry'}],
-        [{'text': '🥛 Dairy & Eggs'}, {'text': '🍞 Bakery'}],
-        [{'text': '🧴 Household'}, {'text': '🔙 Main Menu'}]
+        [{'text': '🥛 Dairy & Eggs'}, {'text': '🔙 Main Menu'}]
     ]
 
     send_message(chat_id, categories, keyboard=keyboard)
@@ -680,13 +679,6 @@ def handle_message(chat_id, text):
             handle_checkout(chat_id)
         elif text in grocery_categories:
             show_category_items(chat_id, text)
-        elif text == '💰 Cash on Delivery':
-            if user_sessions.get(chat_id, {}).get('step') == 'awaiting_payment_method':
-                send_message(chat_id, "🚚 Great! You've chosen Cash on Delivery.\n\nPlease provide your full name:")
-                user_sessions[chat_id] = {'step': 'awaiting_name', 'payment_method': 'Cash on Delivery'}
-        elif text == '💳 Online Payment (Soon)':
-            send_message(chat_id, "⚡ Online payments coming soon!\n\nFor now, please use Cash on Delivery for your orders.")
-            handle_payment_selection(chat_id)
         elif user_sessions.get(chat_id, {}).get('step') == 'awaiting_name':
             customer_name = text
             user_sessions[chat_id] = {'step': 'awaiting_phone', 'customer_name': customer_name}
@@ -706,15 +698,15 @@ def handle_message(chat_id, text):
             special_instructions = text if text.lower() != 'none' else ""
             session_data = user_sessions[chat_id]
             
-            if session_data.get('payment_method') == 'Cash on Delivery':
-                process_cash_on_delivery(
-                    chat_id,
-                    session_data['customer_name'],
-                    session_data['phone'],
-                    session_data['address'],
-                    user_carts[chat_id],
-                    special_instructions
-                )
+            # Process cash on delivery order
+            process_cash_on_delivery(
+                chat_id,
+                session_data['customer_name'],
+                session_data['phone'],
+                session_data['address'],
+                user_carts[chat_id],
+                special_instructions
+            )
         elif user_sessions.get(chat_id, {}).get('step') == 'awaiting_cancel_reason':
             # Admin providing cancellation reason
             order_id = user_sessions[chat_id].get('order_id')
@@ -723,6 +715,10 @@ def handle_message(chat_id, text):
             else:
                 send_message(chat_id, f"❌ Failed to cancel order #{order_id}")
             user_sessions[chat_id] = {'step': 'main_menu'}
+        elif text == '📞 Contact Store':
+            send_message(chat_id, "📞 FreshMart Contact Info:\n\n🏪 Store: FreshMart Grocery\n📞 Phone: 555-1234\n📍 Address: 123 Main Street\n⏰ Hours: 7 AM - 10 PM Daily")
+        elif text == 'ℹ️ Store Info':
+            send_message(chat_id, "🏪 FreshMart Grocery\n\n🌟 Your trusted local grocery store!\n\n🚚 Free delivery on orders over $50\n💰 Cash on delivery only\n⏰ Fast 2-hour delivery\n🥦 Fresh produce daily\n📞 Call: 555-1234")
         else:
             # Handle any other text by showing main menu
             handle_start(chat_id)
@@ -741,7 +737,7 @@ def main():
 
     logger.info("🛒 FreshMart Grocery Bot Started Successfully!")
     logger.info("📊 Features: Order Tracking, Admin Controls, Real-time Updates")
-    logger.info("💰 Payment: Cash on Delivery Implemented")
+    logger.info("💰 Payment: Cash on Delivery Only")
     logger.info("📱 Ready to take orders with professional order tracking!")
 
     while True:
